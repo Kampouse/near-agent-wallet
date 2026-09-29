@@ -1,0 +1,16 @@
+{
+  "name": "near-agent-wallet",
+  "version": "0.1.0",
+  "description": "Local-keys NEAR wallet for browser dApps and AI agents — loopback signer daemon + near-connect sandbox executor. Clone, setup, connect.",
+  "type": "module",
+  "scripts": {
+    "setup": "node setup.mjs",
+    "start": "node daemon.mjs"
+  },
+  "bin": {
+    "near-agent-wallet": "./daemon.mjs"
+  },
+  "dependencies": {
+    "near-api-js": "^5.0.5"
+  }
+}
