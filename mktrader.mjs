@@ -1,16 +1,24 @@
-// One-shot: create trader.fac2kampy.testnet (sub-account, 2 NEAR), save its key
-// to ~/.near-credentials/testnet/ for the signer daemon. Parent pays from its key.
+// One-shot: create <TRADER> as a sub-account of an existing local account
+// (funded with FUND NEAR), saving the key to ~/.near-credentials/testnet/.
+// Usage: TRADER=mytrader PARENT=myaccount.testnet node mktrader.mjs
+// Defaults: TRADER=agent-wallet, PARENT = first account found in CREDS.
 import { sha256 } from "@noble/hashes/sha256";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import * as nearAPI from "near-api-js";
 
-const PARENT = "fac2kampy.testnet";
-const TRADER = "trader.fac2kampy.testnet";
-const FUND = BigInt(1) * 10n ** 24n;
 const CREDS = path.join(os.homedir(), ".near-credentials", "testnet");
 const RPC = "https://rpc.testnet.fastnear.com";
+
+const locals = fs.existsSync(CREDS)
+  ? fs.readdirSync(CREDS).filter((f) => f.endsWith(".json")).map((f) => f.replace(/\.json$/, ""))
+  : [];
+const PARENT = process.env.PARENT || locals.find((a) => !a.startsWith("agent-wallet.")) || locals[0];
+const TRADER = process.env.TRADER
+  || (PARENT && PARENT.includes(".") ? `agent-wallet.${PARENT}` : "agent-wallet.testnet");
+if (!PARENT) { console.error("no local accounts — fund an account first (see setup)"); process.exit(1); }
+const FUND = BigInt(process.env.FUND_NEAR || "1") * 10n ** 24n;
 
 const { KeyPair, transactions, providers, utils } = nearAPI;
 const provider = new providers.JsonRpcProvider({ url: RPC });

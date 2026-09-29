@@ -1,4 +1,4 @@
-// kampy local signer daemon — signs NEAR testnet txs with keys from ~/.near-credentials.
+// near-agent-wallet local signer daemon — signs NEAR testnet txs with keys from ~/.near-credentials.
 // Binds 127.0.0.1 only. The browser never sees a private key: it POSTs unsigned
 // wallet-selector-style actions here; we sign + broadcast + return the outcome.
 import http from "node:http";
