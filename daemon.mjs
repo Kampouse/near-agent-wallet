@@ -31,8 +31,11 @@ function log(line) {
 
 function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Access-Control-Request-Private-Network");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  // https dApps → loopback daemon: Chrome's Private Network Access preflight
+  // stalls forever unless this is present on the OPTIONS response.
+  res.setHeader("Access-Control-Allow-Private-Network", "true");
 }
 
 function json(res, code, body) {
@@ -148,9 +151,28 @@ async function signAndSend(body) {
 
 const EXECUTOR = fs.readFileSync(path.join(import.meta.dirname, "executor.js"), "utf8");
 
+// Serve a dApp front-end from the loopback origin so browser network isolation
+// (public-https pages can't reach loopback daemons in modern Chrome) never
+// blocks agent mode. The page is fetched live from APP_URL and cached 60s —
+// deploy the dApp normally, agent mode always gets the current build.
+const APP_URL = process.env.APP_URL || "https://crosspost-relay-bridge.kj95hgdgnn.workers.dev/";
+let appCache = { at: 0, body: "" };
+async function serveApp(res) {
+  const now = Date.now();
+  if (!appCache.body || now - appCache.at > 60000) {
+    const r = await fetch(APP_URL);
+    appCache = { at: now, body: await r.text() };
+  }
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(appCache.body);
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
   if (req.method === "OPTIONS") { cors(res); res.writeHead(204); return res.end(); }
+  if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/app")) {
+    return serveApp(res);
+  }
 
   try {
     if (req.method === "GET" && url.pathname === "/executor.js") {
