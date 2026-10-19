@@ -104,27 +104,48 @@ async function signAndSend(body) {
   const kp = keyFor(signerId);
   const pk = kp.getPublicKey();
 
+  // read the optimistic tip: "final" lags just-landed txs by ~2 blocks, so a
+  // tx sent right after another one re-derives the consumed nonce and bounces
   const accessKey = await provider.query({
-    request_type: "view_access_key", account_id: signerId, public_key: pk.toString(), finality: "final",
+    request_type: "view_access_key", account_id: signerId, public_key: pk.toString(), finality: "optimistic",
   });
   if (accessKey.permission !== "FullAccess") throw new Error("key is not full-access");
-  const block = await provider.block({ finality: "final" });
+  const block = await provider.block({ finality: "optimistic" });
 
-  const tx = new transactions.Transaction({
-    signerId,
-    publicKey: pk,
-    nonce: BigInt(accessKey.nonce) + 1n,
-    blockHash: nearAPI.utils.serialize.base_decode(block.header.hash),
-    receiverId,
-    actions: buildActions(body.actions),
-  });
-  const digest = new Uint8Array(sha256(tx.encode()));
-  const sig = kp.sign(digest);
-  const signedTx = new transactions.SignedTransaction({
-    transaction: tx,
-    signature: new transactions.Signature({ keyType: tx.publicKey.keyType, data: sig.signature }),
-  });
-  const outcome = await provider.sendTransaction(signedTx);
+  const buildSigned = (ak, blk) => {
+    const tx = new transactions.Transaction({
+      signerId,
+      publicKey: pk,
+      nonce: BigInt(ak.nonce) + 1n,
+      blockHash: nearAPI.utils.serialize.base_decode(blk.header.hash),
+      receiverId,
+      actions: buildActions(body.actions),
+    });
+    const digest = new Uint8Array(sha256(tx.encode()));
+    const sig = kp.sign(digest);
+    return new transactions.SignedTransaction({
+      transaction: tx,
+      signature: new transactions.Signature({ keyType: tx.publicKey.keyType, data: sig.signature }),
+    });
+  };
+
+  // one retry on a nonce collision — the optimistic tip can still move under
+  // us between the query and the send; re-reading it once self-heals
+  let outcome;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      outcome = await provider.sendTransaction(attempt === 0 ? buildSigned(accessKey, block) : buildSigned(
+        await provider.query({
+          request_type: "view_access_key", account_id: signerId, public_key: pk.toString(), finality: "optimistic",
+        }),
+        await provider.block({ finality: "optimistic" }),
+      ));
+      break;
+    } catch (e) {
+      if (attempt === 0 && /nonce/i.test(String(e?.error?.message || e?.message || e))) continue;
+      throw e;
+    }
+  }
   const hash = outcome.transaction.hash;
   const failed = typeof outcome.status === "object" && "Failure" in outcome.status;
   log(`${failed ? "FAIL" : "SENT"} ${signerId} -> ${receiverId} :: ${(body.actions || []).map((a) => a.params?.methodName).join(",")} :: ${hash}`);
