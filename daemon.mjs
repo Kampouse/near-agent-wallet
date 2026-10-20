@@ -171,7 +171,7 @@ async function signAndSend(body) {
   };
 }
 
-const EXECUTOR = fs.readFileSync(path.join(import.meta.dirname, "executor.js"), "utf8");
+const EXECUTOR_SRC = fs.readFileSync(path.join(import.meta.dirname, "executor.js"), "utf8");
 
 // Serve a dApp front-end from the loopback origin so browser network isolation
 // (public-https pages can't reach loopback daemons in modern Chrome) never
@@ -189,10 +189,37 @@ async function serveApp(res) {
   res.end(appCache.body);
 }
 
+// serve the built frontend (SPA) from loopback TLS — a local-origin page can
+// reach the daemon with no Private-Network permission prompt, unlike the
+// public pages.dev deployment (Chrome blocks public→local fetches there).
+const DIST = process.env.FRONTEND_DIST || "/Users/asil/dev/clmm-frontend/dist";
+const MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".json": "application/json",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".woff2": "font/woff2",
+};
+function serveDist(res, pathname) {
+  const rel = pathname === "/" ? "/index.html" : pathname;
+  const abs = path.join(DIST, path.normalize(rel).replace(/^(\.\.[/\\])+/, ""));
+  let file = abs;
+  if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) {
+    file = path.join(DIST, "index.html"); // SPA fallback
+  }
+  if (!fs.existsSync(file)) { res.writeHead(404); return res.end("no frontend build"); }
+  cors(res);
+  res.writeHead(200, { "Content-Type": MIME[path.extname(file)] || "application/octet-stream" });
+  res.end(fs.readFileSync(file));
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
   if (req.method === "OPTIONS") { cors(res); res.writeHead(204); return res.end(); }
-  if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/app")) {
+  if (req.method === "GET" && (url.pathname === "/app")) {
     return serveApp(res);
   }
 
@@ -200,7 +227,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/executor.js") {
       cors(res);
       res.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8" });
-      return res.end(EXECUTOR);
+      return res.end(EXECUTOR_SRC.replace("__DAEMON_ORIGIN__", req.__origin || "http://127.0.0.1:8391"));
     }
     if (req.method === "GET" && url.pathname === "/health") {
       return json(res, 200, { ok: true, network: NETWORK, accounts: listAccounts().length, active: activeAccount });
@@ -230,6 +257,7 @@ const server = http.createServer(async (req, res) => {
       const result = await signAndSend(b);
       return json(res, 200, result);
     }
+    if (req.method === "GET") return serveDist(res, url.pathname);
     return json(res, 404, { error: "not found" });
   } catch (e) {
     log(`ERR ${url.pathname} :: ${String(e.message || e).slice(0, 200)}`);
@@ -261,7 +289,10 @@ try {
     key: fs.readFileSync("/Users/asil/.config/local-daemon-tls/daemon-key.pem"),
     cert: fs.readFileSync("/Users/asil/.config/local-daemon-tls/daemon.pem"),
   };
-  const httpsServer = https.createServer(tlsCerts, (req, res) => server.emit("request", req, res));
+  const httpsServer = https.createServer(tlsCerts, (req, res) => {
+    req.__origin = "https://127.0.0.1:8392";
+    server.emit("request", req, res);
+  });
   httpsServer.listen(8392, "127.0.0.1", () => {
     log("https loopback listening on https://127.0.0.1:8392");
     console.log("https://127.0.0.1:8392 (loopback TLS for https dApps)");
