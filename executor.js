@@ -1,7 +1,8 @@
 // local-keys wallet executor — runs inside near-connect's sandboxed iframe.
 // Signs NOTHING here: delegates to the local daemon (http://127.0.0.1:8391).
 // RPC + broadcast also happen daemon-side; this file is a thin bridge.
-const DAEMON = "http://127.0.0.1:8391";
+// same origin as this executor — the daemon serves it (http :8391 or TLS :8392)
+const DAEMON = location.origin;
 const NETWORK = "testnet";
 
 async function api(path, opts) {

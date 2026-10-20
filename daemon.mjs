@@ -2,6 +2,7 @@
 // Binds 127.0.0.1 only. The browser never sees a private key: it POSTs unsigned
 // wallet-selector-style actions here; we sign + broadcast + return the outcome.
 import http from "node:http";
+import https from "node:https";
 import { sha256 } from "@noble/hashes/sha256";
 import fs from "node:fs";
 import path from "node:path";
@@ -251,6 +252,22 @@ activeAccount = null;
   const accs = listAccounts();
   const pick = accs.find((a) => a.accountId === PREFERRED) || accs[0];
   activeAccount = pick ? pick.accountId : null;
+}
+
+// HTTPS loopback on :8392 — production (https) pages can't embed http iframes
+// (mixed content), so the sandbox wallet must also be reachable over TLS.
+try {
+  const tlsCerts = {
+    key: fs.readFileSync("/Users/asil/.config/local-daemon-tls/daemon-key.pem"),
+    cert: fs.readFileSync("/Users/asil/.config/local-daemon-tls/daemon.pem"),
+  };
+  const httpsServer = https.createServer(tlsCerts, (req, res) => server.emit("request", req, res));
+  httpsServer.listen(8392, "127.0.0.1", () => {
+    log("https loopback listening on https://127.0.0.1:8392");
+    console.log("https://127.0.0.1:8392 (loopback TLS for https dApps)");
+  });
+} catch (e) {
+  console.warn("no https loopback:", e.message);
 }
 
 server.listen(PORT, "127.0.0.1", () => {
