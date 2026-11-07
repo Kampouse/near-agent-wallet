@@ -3,11 +3,19 @@
 // wallet-selector-style actions here; we sign + broadcast + return the outcome.
 import http from "node:http";
 import https from "node:https";
-import { sha256 } from "@noble/hashes/sha256";
+import { sha256 } from "@noble/hashes/sha2.js";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import * as nearAPI from "near-api-js";
+import {
+  KeyPair,
+  JsonRpcProvider,
+  Transaction,
+  SignedTransaction,
+  Signature,
+  baseDecode,
+  actions as najActions,
+} from "near-api-js";
 
 const PORT = 8391;
 const NETWORK = "testnet";
@@ -19,8 +27,7 @@ const MAX_DEPOSIT = BigInt(process.env.MAX_DEPOSIT_NEAR || "5") * 10n ** 24n;
 const RECEIVER_SUFFIX = process.env.ALLOW_RECEIVER_SUFFIX || "testnet"; // receivers must end with this
 const MAINNET_BLOCK = NETWORK === "mainnet" && !process.env.ALLOW_MAINNET;
 
-const { KeyPair, transactions, providers } = nearAPI;
-const provider = new providers.JsonRpcProvider({ url: RPC });
+const provider = new JsonRpcProvider({ url: RPC });
 
 let activeAccount = null; // set by /activate (executor signIn)
 
@@ -65,6 +72,66 @@ function keyFor(accountId) {
   return KeyPair.fromString(d.private_key);
 }
 
+// base58 (NEAR code-hash encoding) → hex string, for naj7's useGlobalContract
+const B58_ALPH = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+function b58ToHex(s) {
+  let n = 0n;
+  for (const ch of s) {
+    const idx = B58_ALPH.indexOf(ch);
+    if (idx < 0) throw new Error(`bad base58 char ${ch}`);
+    n = n * 58n + BigInt(idx);
+  }
+  let hex = n.toString(16);
+  if (hex.length % 2) hex = "0" + hex;
+  let zeros = 0;
+  while (zeros < s.length && s[zeros] === "1") zeros++;
+  return "00".repeat(zeros) + hex;
+}
+
+// serialization law: code travels as codeB64 (Uint8Array dies over JSON —
+// caught live: an empty wasm got registered as a global contract)
+function codeOf(p) {
+  if (typeof p.codeB64 === "string" && p.codeB64.length > 0) {
+    return new Uint8Array(Buffer.from(p.codeB64, "base64"));
+  }
+  const c = new Uint8Array(p.code || []);
+  if (!c.length) throw new Error("POLICY: no code — send codeB64 (Uint8Array does not survive JSON)");
+  return c;
+}
+
+const ACTION_BUILDERS = {
+  FunctionCall: (p) =>
+    najActions.functionCall(p.methodName, p.args, BigInt(p.gas), BigInt(p.deposit || "0")),
+  CreateAccount: () => najActions.createAccount(),
+  Transfer: (p) => najActions.transfer(BigInt(p.deposit || "0")),
+  DeployContract: (p) => najActions.deployContract(codeOf(p)),
+  DeployGlobalContract: (p) =>
+    najActions.deployGlobalContract(
+      codeOf(p),
+      String(p.deployMode || "CodeHash").toLowerCase() === "accountid" ? "AccountId" : "codeHash",
+    ),
+  UseGlobalContract: (p) => {
+    const id = p.contractIdentifier || {};
+    return najActions.useGlobalContract(
+      id.accountId
+        ? { accountId: id.accountId }
+        : { codeHash: /^[0-9a-fA-F]{64}$/.test(id.codeHash) ? id.codeHash : b58ToHex(id.codeHash) },
+    );
+  },
+  AddKey: (p) =>
+    najActions.addKey(
+      KeyPair.fromString(`${p.publicKey}`).getPublicKey(),
+      p.accessKey?.permission === "FullAccess"
+        ? najActions.fullAccessKey()
+        : najActions.functionCallAccessKey(
+            p.accessKey?.receiverId || "",
+            p.accessKey?.methodNames || [],
+            p.accessKey?.allowance ? BigInt(p.accessKey.allowance) : undefined,
+          ),
+    ),
+  DeleteKey: (p) => najActions.deleteKey(KeyPair.fromString(`${p.publicKey}`).getPublicKey()),
+};
+
 function checkPolicy(receiverId, actions) {
   if (MAINNET_BLOCK) throw new Error("POLICY: mainnet disabled (set ALLOW_MAINNET=1 to override)");
   if (!receiverId || !receiverId.endsWith(RECEIVER_SUFFIX)) {
@@ -72,26 +139,25 @@ function checkPolicy(receiverId, actions) {
   }
   let total = 0n;
   for (const a of actions) {
-    if (a.type !== "FunctionCall") throw new Error(`POLICY: unsupported action ${a.type}`);
+    if (!ACTION_BUILDERS[a.type]) throw new Error(`POLICY: unsupported action ${a.type}`);
     const p = a.params || {};
-    if (!p.methodName) throw new Error("POLICY: missing methodName");
-    if (typeof p.args !== "object") throw new Error("POLICY: args must be an object");
-    if (BigInt(p.gas || "0") > 300_000_000_000_000n) throw new Error("POLICY: gas over 300 Tgas");
-    total += BigInt(p.deposit || "0");
+    if (a.type === "FunctionCall") {
+      if (!p.methodName) throw new Error("POLICY: missing methodName");
+      if (typeof p.args !== "object") throw new Error("POLICY: args must be an object");
+      if (BigInt(p.gas || "0") > 300_000_000_000_000n) throw new Error("POLICY: gas over 300 Tgas");
+      total += BigInt(p.deposit || "0");
+    } else if (a.type === "Transfer") {
+      total += BigInt(p.deposit || "0");
+    } else if (a.type === "DeployGlobalContract") {
+      // one-time ~3N burn for 30KB code — capped like any other deposit
+      total += BigInt(process.env.MAX_GLOBAL_DEPLOY_NEAR || "5") * 10n ** 24n;
+    }
   }
   if (total > MAX_DEPOSIT) throw new Error(`POLICY: deposit ${total} exceeds cap ${MAX_DEPOSIT}`);
 }
 
 function buildActions(actions) {
-  return actions.map((a) => {
-    const p = a.params;
-    return transactions.functionCall(
-      p.methodName,
-      p.args,
-      BigInt(p.gas),
-      BigInt(p.deposit || "0"),
-    );
-  });
+  return actions.map((a) => ACTION_BUILDERS[a.type](a.params || {}));
 }
 
 async function signAndSend(body) {
@@ -111,22 +177,22 @@ async function signAndSend(body) {
     request_type: "view_access_key", account_id: signerId, public_key: pk.toString(), finality: "optimistic",
   });
   if (accessKey.permission !== "FullAccess") throw new Error("key is not full-access");
-  const block = await provider.block({ finality: "optimistic" });
+  const block = await provider.viewBlock({ finality: "optimistic" });
 
   const buildSigned = (ak, blk) => {
-    const tx = new transactions.Transaction({
+    const tx = new Transaction({
       signerId,
       publicKey: pk,
       nonce: BigInt(ak.nonce) + 1n,
-      blockHash: nearAPI.utils.serialize.base_decode(blk.header.hash),
+      blockHash: baseDecode(blk.header.hash),
       receiverId,
       actions: buildActions(body.actions),
     });
     const digest = new Uint8Array(sha256(tx.encode()));
     const sig = kp.sign(digest);
-    return new transactions.SignedTransaction({
+    return new SignedTransaction({
       transaction: tx,
-      signature: new transactions.Signature({ keyType: tx.publicKey.keyType, data: sig.signature }),
+      signature: new Signature({ keyType: tx.publicKey.keyType, data: sig.signature }),
     });
   };
 
@@ -139,7 +205,7 @@ async function signAndSend(body) {
         await provider.query({
           request_type: "view_access_key", account_id: signerId, public_key: pk.toString(), finality: "optimistic",
         }),
-        await provider.block({ finality: "optimistic" }),
+        await provider.viewBlock({ finality: "optimistic" }),
       ));
       break;
     } catch (e) {

@@ -11,6 +11,6 @@
     "near-agent-wallet": "./daemon.mjs"
   },
   "dependencies": {
-    "near-api-js": "^5.0.5"
+    "near-api-js": "^7.4.0"
   }
 }
