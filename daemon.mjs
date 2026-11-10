@@ -224,6 +224,10 @@ async function signAndSend(body) {
   }
   return {
     transaction: { hash },
+    // near-kit's wallet path short-circuits on final_execution_status — omit
+    // it and near-kit falls back to an RPC `tx` status poll, which fastnear
+    // does not implement (HTTP 400) → "wrap failed" on a successful tx.
+    final_execution_status: outcome.final_execution_status || "EXECUTED_OPTIMISTIC",
     status: outcome.status,
     transaction_outcome: { outcome: { gas_burnt: outcome.transaction_outcome?.outcome?.gas_burnt } },
     receipts_outcome: (outcome.receipts_outcome || []).map((r) => ({
