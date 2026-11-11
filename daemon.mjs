@@ -201,12 +201,15 @@ async function signAndSend(body) {
   let outcome;
   for (let attempt = 0; ; attempt++) {
     try {
-      outcome = await provider.sendTransaction(attempt === 0 ? buildSigned(accessKey, block) : buildSigned(
+      // v7.4: plain sendTransaction() is optimistic-only and IGNORES a
+      // waitUntil arg — sendTransactionUntil is the one that waits for FINAL
+      // and returns receipts_outcome with statuses (kit parseSwapUsed needs them)
+      outcome = await provider.sendTransactionUntil(attempt === 0 ? buildSigned(accessKey, block) : buildSigned(
         await provider.query({
           request_type: "view_access_key", account_id: signerId, public_key: pk.toString(), finality: "optimistic",
         }),
         await provider.viewBlock({ finality: "optimistic" }),
-      ));
+      ), "FINAL");
       break;
     } catch (e) {
       if (attempt === 0 && /nonce/i.test(String(e?.error?.message || e?.message || e))) continue;
@@ -229,13 +232,22 @@ async function signAndSend(body) {
     // does not implement (HTTP 400) → "wrap failed" on a successful tx.
     final_execution_status: outcome.final_execution_status || "EXECUTED_OPTIMISTIC",
     status: outcome.status,
-    transaction_outcome: { outcome: { gas_burnt: outcome.transaction_outcome?.outcome?.gas_burnt } },
+    // transaction_outcome.id is the TX HASH — kit.swap reads it as txHashes
+    // (adapter.ts:105) — omitting it made every swap leg resolve against
+    // params [null, account] → false "pool refunded" on successful swaps
+    transaction_outcome: {
+      id: outcome.transaction_outcome?.id ?? hash,
+      outcome: { gas_burnt: outcome.transaction_outcome?.outcome?.gas_burnt },
+    },
     receipts_outcome: (outcome.receipts_outcome || []).map((r) => ({
       id: r.id,
       outcome: {
         executor_id: r.outcome?.executor_id,
         gas_burnt: r.outcome?.gas_burnt,
         logs: r.outcome?.logs || [],
+        // kit parseSwapUsed scans r.outcome.status.SuccessValue for `used:<kept>`
+        // — without status the swap leg reads "unknown" → UI false "pool refunded"
+        status: r.outcome?.status,
       },
     })),
   };
